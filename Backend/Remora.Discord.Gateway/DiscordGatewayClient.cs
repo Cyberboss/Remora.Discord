@@ -46,6 +46,7 @@ using Remora.Discord.Gateway.Responders;
 using Remora.Discord.Gateway.Results;
 using Remora.Discord.Gateway.Services;
 using Remora.Discord.Gateway.Transport;
+using Remora.Discord.Rest.Results;
 using Remora.Results;
 using static System.Net.WebSockets.WebSocketCloseStatus;
 
@@ -231,7 +232,7 @@ namespace Remora.Discord.Gateway
 
                     if (_transportService.IsConnected)
                     {
-                        var disconnectResult = await _transportService.DisconnectAsync(stopRequested.IsCancellationRequested, stopRequested);
+                        var disconnectResult = await _transportService.DisconnectAsync(!stopRequested.IsCancellationRequested, stopRequested);
                         if (!disconnectResult.IsSuccess)
                         {
                             // Couldn't disconnect cleanly :(
@@ -245,7 +246,9 @@ namespace Remora.Discord.Gateway
                         await FinalizeResponderDispatchAsync(runningResponder);
                     }
 
-                    if (stopRequested.IsCancellationRequested)
+                    if (stopRequested.IsCancellationRequested
+                        || (iterationResult.Inner is DiscordRestResultError restResultError
+                        && restResultError.DiscordError.Code == API.Abstractions.Results.DiscordError.GeneralError))
                     {
                         // The user requested a termination, and we don't intend to reconnect.
                         return iterationResult;
@@ -525,17 +528,28 @@ namespace Remora.Discord.Gateway
                         }
                     }
 
-                    await Task.Delay(TimeSpan.FromMilliseconds(10), stopRequested);
+                    try
+                    {
+                        await Task.Delay(TimeSpan.FromMilliseconds(10), stopRequested);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // will cleanup below
+                    }
+
                     break;
                 }
             }
 
-            if (!_shouldReconnect)
+            if (!stopRequested.IsCancellationRequested)
             {
-                return Result.FromSuccess();
-            }
+                if (!_shouldReconnect)
+                {
+                    return Result.FromSuccess();
+                }
 
-            _log.LogInformation("Reconnection requested by the gateway; terminating session...");
+                _log.LogInformation("Reconnection requested by the gateway; terminating session...");
+            }
 
             // Terminate the send and receive tasks
             _disconnectRequestedSource.Cancel();
@@ -545,7 +559,7 @@ namespace Remora.Discord.Gateway
             _ = await _sendTask;
             _ = await _receiveTask;
 
-            var disconnectResult = await _transportService.DisconnectAsync(true, stopRequested);
+            var disconnectResult = await _transportService.DisconnectAsync(!stopRequested.IsCancellationRequested, stopRequested);
             if (!disconnectResult.IsSuccess)
             {
                 return disconnectResult;
